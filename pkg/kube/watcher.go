@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+// TODO: use clock.PassiveClock instead of time.Now() for testing
 var startUpTime = time.Now()
 
 type EventHandler func(event *EnhancedEvent)
@@ -67,27 +69,63 @@ func (e *EventWatcher) OnUpdate(oldObj, newObj interface{}) {
 	e.onEvent(event)
 }
 
-// Ignore events older than the maxEventAgeSeconds
+// Ignore events older than the maxEventAgeSeconds.
 func (e *EventWatcher) isEventDiscarded(event *corev1.Event) bool {
-	timestamp := event.LastTimestamp.Time
-	if timestamp.IsZero() {
-		timestamp = event.EventTime.Time
-	}
-	eventAge := time.Since(timestamp)
+	eventAge, timeUsedForAge := getEventAge(event)
 	if eventAge > e.maxEventAgeSeconds {
 		// Log discarded events if they were created after the watcher started
 		// (to suppres warnings from initial synchrnization)
-		if timestamp.After(startUpTime) {
+		if timeUsedForAge.After(startUpTime) {
 			log.Warn().
-				Str("event age", eventAge.String()).
-				Str("event namespace", event.Namespace).
-				Str("event name", event.Name).
-				Msg("Event discarded as being older then maxEventAgeSeconds")
+				Str("eventAge", eventAge.String()).
+				Str("eventNamespace", event.Namespace).
+				Str("eventName", event.Name).
+				Str("eventMessage", event.Message).
+				Str("eventReason", event.Reason).
+				Str("eventSourceComponent", event.Source.Component).
+				Str("eventSourceHost", event.Source.Host).
+				Str("eventFirstTimestamp", event.FirstTimestamp.String()).
+				Str("eventLastTimestamp", event.LastTimestamp.String()).
+				Str("eventCreationTime", event.CreationTimestamp.String()).
+				Str("eventEventTime", event.EventTime.String()).
+				Str("involvedObjectAPIVersion", event.InvolvedObject.APIVersion).
+				Str("involvedObjectKind", event.InvolvedObject.Kind).
+				Str("involvedObjectNamespace", event.InvolvedObject.Namespace).
+				Str("involvedObjectName", event.InvolvedObject.Name).
+				Str("involvedObjectUID", string(event.InvolvedObject.UID)).
+				Msg(fmt.Sprintf("Event discarded as being older than maxEventAgeSeconds: %v", e.maxEventAgeSeconds))
 			e.metricsStore.EventsDiscarded.Inc()
 		}
 		return true
 	}
 	return false
+}
+
+// getEventAge returns the age of the event and the time used for age calculation.
+// The time used for age calculation is the greater of creationTimestamp and
+// lastTimestamp (or eventTime if lastTimestamp is empty and firstTimestamp if eventTime is empty).
+// While based on event aggregation, lastTimestamp should be greater than creationTimestamp,
+// in practice it doesn't always seem to be the case. Hence, we compare and use the
+// greater of the two to ensure that we process the event and don't skip it.
+func getEventAge(event *corev1.Event) (time.Duration, time.Time) {
+	var timeUsedForAgeCalculation time.Time
+
+	eventTimestamp := event.LastTimestamp.Time
+	if event.LastTimestamp.IsZero() {
+		if event.EventTime.IsZero() {
+			eventTimestamp = event.FirstTimestamp.Time
+		} else {
+			eventTimestamp = event.EventTime.Time
+		}
+	}
+
+	if event.CreationTimestamp.Time.After(eventTimestamp) {
+		timeUsedForAgeCalculation = event.CreationTimestamp.Time
+	} else {
+		timeUsedForAgeCalculation = eventTimestamp
+	}
+
+	return time.Since(timeUsedForAgeCalculation), timeUsedForAgeCalculation
 }
 
 func (e *EventWatcher) onEvent(event *corev1.Event) {
