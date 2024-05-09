@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/clock"
 )
 
 // TODO: use clock.PassiveClock instead of time.Now() for testing
@@ -71,10 +72,10 @@ func (e *EventWatcher) OnUpdate(oldObj, newObj interface{}) {
 
 // Ignore events older than the maxEventAgeSeconds.
 func (e *EventWatcher) isEventDiscarded(event *corev1.Event) bool {
-	eventAge, timeUsedForAge := getEventAge(event)
+	eventAge, timeUsedForAge := getEventAge(event, clock.RealClock{})
 	if eventAge > e.maxEventAgeSeconds {
 		// Log discarded events if they were created after the watcher started
-		// (to suppres warnings from initial synchrnization)
+		// (to suppres warnings from initial synchronization)
 		if timeUsedForAge.After(startUpTime) {
 			log.Warn().
 				Str("eventAge", eventAge.String()).
@@ -103,29 +104,20 @@ func (e *EventWatcher) isEventDiscarded(event *corev1.Event) bool {
 
 // getEventAge returns the age of the event and the time used for age calculation.
 // The time used for age calculation is the greater of creationTimestamp and
-// lastTimestamp (or eventTime if lastTimestamp is empty and firstTimestamp if eventTime is empty).
-// While based on event aggregation, lastTimestamp should be greater than creationTimestamp,
-// in practice it doesn't always seem to be the case. Hence, we compare and use the
-// greater of the two to ensure that we process the event and don't skip it.
-func getEventAge(event *corev1.Event) (time.Duration, time.Time) {
+// lastTimestamp. While based on event aggregation, lastTimestamp should be greater
+// than creationTimestamp, in practice it doesn't always seem to be the case.
+// Hence, we compare and use the greater of the two to ensure that we process the
+// event and don't skip it.
+func getEventAge(event *corev1.Event, clock clock.PassiveClock) (time.Duration, time.Time) {
 	var timeUsedForAgeCalculation time.Time
 
-	eventTimestamp := event.LastTimestamp.Time
-	if event.LastTimestamp.IsZero() {
-		if event.EventTime.IsZero() {
-			eventTimestamp = event.FirstTimestamp.Time
-		} else {
-			eventTimestamp = event.EventTime.Time
-		}
-	}
-
-	if event.CreationTimestamp.Time.After(eventTimestamp) {
+	if event.CreationTimestamp.Time.After(event.LastTimestamp.Time) {
 		timeUsedForAgeCalculation = event.CreationTimestamp.Time
 	} else {
-		timeUsedForAgeCalculation = eventTimestamp
+		timeUsedForAgeCalculation = event.LastTimestamp.Time
 	}
 
-	return time.Since(timeUsedForAgeCalculation), timeUsedForAgeCalculation
+	return clock.Since(timeUsedForAgeCalculation), timeUsedForAgeCalculation
 }
 
 func (e *EventWatcher) onEvent(event *corev1.Event) {

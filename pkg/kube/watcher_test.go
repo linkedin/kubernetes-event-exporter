@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	testclock "k8s.io/utils/clock/testing"
 )
 
 type mockObjectMetadataProvider struct {
@@ -130,23 +131,47 @@ func TestEventWatcher_EventAge_whenEventCreatedAfterStartupAndBeforeMaxAge(t *te
 
 	startup := time.Now().Add(-10 * time.Minute)
 	ew.setStartUpTime(startup)
-	// event is 8m after startup time (2m in max age) -> expect processed
-	event1 := corev1.Event{
-		ObjectMeta: metav1.ObjectMeta{
-			CreationTimestamp: metav1.Time{Time: startup.Add(8 * time.Minute)},
-		},
-		InvolvedObject: corev1.ObjectReference{
-			UID:  "test",
-			Name: "test-1",
-		},
-	}
 
-	assert.False(t, ew.isEventDiscarded(&event1))
-	assert.NotContains(t, output.String(), "Event discarded as being older then maxEventAgeSeconds")
-	ew.onEvent(&event1)
-	assert.Contains(t, output.String(), "test-1")
-	assert.Contains(t, output.String(), "Received event")
-	assert.Equal(t, float64(1), testutil.ToFloat64(metricsStore.EventsProcessed))
+	t.Run("last timetamp is empty", func(t *testing.T) {
+		// creation time is 8m after startup time (2m in max age) -> expect processed
+		event := corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				CreationTimestamp: metav1.Time{Time: startup.Add(8 * time.Minute)},
+			},
+			InvolvedObject: corev1.ObjectReference{
+				UID:  "test",
+				Name: "test-1",
+			},
+		}
+
+		assert.False(t, ew.isEventDiscarded(&event))
+		assert.NotContains(t, output.String(), "Event discarded as being older then maxEventAgeSeconds")
+		ew.onEvent(&event)
+		assert.Contains(t, output.String(), "test-1")
+		assert.Contains(t, output.String(), "Received event")
+		assert.Equal(t, float64(1), testutil.ToFloat64(metricsStore.EventsProcessed))
+	})
+
+	t.Run("last timetamp is after creation timestamp", func(t *testing.T) {
+		// event is 8m after stratup time (2m after max age) -> expect processed
+		event := corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				CreationTimestamp: metav1.Time{Time: startup},
+			},
+			LastTimestamp: metav1.Time{Time: startup.Add(9 * time.Minute)},
+			InvolvedObject: corev1.ObjectReference{
+				UID:  "test",
+				Name: "test-2",
+			},
+		}
+
+		assert.False(t, ew.isEventDiscarded(&event))
+		assert.NotContains(t, output.String(), "Event discarded as being older then maxEventAgeSeconds")
+		ew.onEvent(&event)
+		assert.Contains(t, output.String(), "test-2")
+		assert.Contains(t, output.String(), "Received event")
+		assert.Equal(t, float64(2), testutil.ToFloat64(metricsStore.EventsProcessed))
+	})
 
 	metrics.DestroyMetricsStore(metricsStore)
 }
@@ -162,18 +187,37 @@ func TestEventWatcher_EventAge_whenEventCreatedAfterStartupAndAfterMaxAge(t *tes
 	// event is 3m after stratup time (and 2m after max age) -> expect dropped with warn
 	startup := time.Now().Add(-10 * time.Minute)
 	ew.setStartUpTime(startup)
-	event1 := corev1.Event{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "event1",
-			CreationTimestamp: metav1.Time{Time: startup.Add(3 * time.Minute)},
-		},
-	}
-	assert.True(t, ew.isEventDiscarded(&event1))
-	assert.Contains(t, output.String(), "event1")
-	assert.Contains(t, output.String(), "Event discarded as being older than maxEventAgeSeconds")
-	ew.onEvent(&event1)
-	assert.NotContains(t, output.String(), "Received event")
-	assert.Equal(t, float64(0), testutil.ToFloat64(metricsStore.EventsProcessed))
+
+	t.Run("last timestamp is empty", func(t *testing.T) {
+		event := corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "event1",
+				CreationTimestamp: metav1.Time{Time: startup.Add(3 * time.Minute)},
+			},
+		}
+		assert.True(t, ew.isEventDiscarded(&event))
+		assert.Contains(t, output.String(), "event1")
+		assert.Contains(t, output.String(), "Event discarded as being older than maxEventAgeSeconds")
+		ew.onEvent(&event)
+		assert.NotContains(t, output.String(), "Received event")
+		assert.Equal(t, float64(0), testutil.ToFloat64(metricsStore.EventsProcessed))
+	})
+
+	t.Run("last timestamp is after creation timestamp", func(t *testing.T) {
+		event := corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "event2",
+				CreationTimestamp: metav1.Time{Time: startup.Add(3 * time.Minute)},
+			},
+			LastTimestamp: metav1.Time{Time: startup.Add(4 * time.Minute)},
+		}
+		assert.True(t, ew.isEventDiscarded(&event))
+		assert.Contains(t, output.String(), "event2")
+		assert.Contains(t, output.String(), "Event discarded as being older than maxEventAgeSeconds")
+		ew.onEvent(&event)
+		assert.NotContains(t, output.String(), "Received event")
+		assert.Equal(t, float64(0), testutil.ToFloat64(metricsStore.EventsProcessed))
+	})
 
 	metrics.DestroyMetricsStore(metricsStore)
 }
@@ -248,4 +292,52 @@ func TestOnEvent_DeletedObjects(t *testing.T) {
 	require.Equal(t, map[string]string(nil), event.InvolvedObject.Annotations)
 	require.Equal(t, map[string]string(nil), event.InvolvedObject.Labels)
 	require.Equal(t, []metav1.OwnerReference(nil), event.InvolvedObject.OwnerReferences)
+}
+
+func TestGetEventAge(t *testing.T) {
+	testTime := time.Date(2024, 1, 2, 3, 4, 5, 6, time.UTC)
+	fakeClock := testclock.NewFakePassiveClock(testTime)
+	testCases := map[string]struct {
+		event                             corev1.Event
+		expectedTimeUsedForAgeCalculation time.Time
+		expectedAge                       time.Duration
+	}{
+		"last timestamp is after creation timestamp": {
+			event: corev1.Event{
+				ObjectMeta: metav1.ObjectMeta{
+					CreationTimestamp: metav1.Time{Time: testTime.Add(-5 * time.Minute)},
+				},
+				LastTimestamp: metav1.Time{Time: testTime.Add(-3 * time.Minute)},
+			},
+			expectedTimeUsedForAgeCalculation: testTime.Add(-3 * time.Minute),
+			expectedAge:                       3 * time.Minute,
+		},
+		"creation timestamp is after last timestamp": {
+			event: corev1.Event{
+				ObjectMeta: metav1.ObjectMeta{
+					CreationTimestamp: metav1.Time{Time: testTime.Add(-2 * time.Minute)},
+				},
+				LastTimestamp: metav1.Time{Time: testTime.Add(-4 * time.Minute)},
+			},
+			expectedTimeUsedForAgeCalculation: testTime.Add(-2 * time.Minute),
+			expectedAge:                       2 * time.Minute,
+		},
+		"last timestamp is empty": {
+			event: corev1.Event{
+				ObjectMeta: metav1.ObjectMeta{
+					CreationTimestamp: metav1.Time{Time: testTime},
+				},
+			},
+			expectedTimeUsedForAgeCalculation: testTime,
+			expectedAge:                       0,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			age, timeUsedForAgeCalculation := getEventAge(&tc.event, fakeClock)
+			require.Equal(t, tc.expectedAge, age)
+			require.Equal(t, tc.expectedTimeUsedForAgeCalculation, timeUsedForAgeCalculation)
+		})
+	}
 }
