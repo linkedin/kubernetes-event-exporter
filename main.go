@@ -82,11 +82,16 @@ func main() {
 
 	engine := exporter.NewEngine(&cfg, &exporter.ChannelBasedReceiverRegistry{MetricsStore: metricsStore})
 	onEvent := engine.OnEvent
-	if len(cfg.ClusterName) != 0 {
+	if cfg.ClusterEnvironment != "" || cfg.ClusterName != "" {
+		log.Info().Msgf("ClusterName: %s, ClusterEnvironment: %s", cfg.ClusterName, cfg.ClusterEnvironment)
+
 		onEvent = func(event *kube.EnhancedEvent) {
-			// note that per code this value is not set anywhere on the kubernetes side
-			// https://github.com/kubernetes/apimachinery/blob/v0.22.4/pkg/apis/meta/v1/types.go#L276
-			event.ClusterName = cfg.ClusterName
+			if cfg.ClusterEnvironment != "" {
+				event.ClusterEnvironment = cfg.ClusterEnvironment
+			}
+			if cfg.ClusterName != "" {
+				event.ClusterName = cfg.ClusterName
+			}
 			engine.OnEvent(event)
 		}
 	}

@@ -35,6 +35,7 @@ type Config struct {
 	MetricsNamePrefix  string                    `yaml:"metricsNamePrefix,omitempty"`
 	OmitLookup         bool                      `yaml:"omitLookup,omitempty"`
 	CacheSize          int                       `yaml:"cacheSize,omitempty"`
+	ClusterEnvironment string                    `yaml:"clusterEnvironment,omitempty"`
 }
 
 func (c *Config) SetDefaults() {
