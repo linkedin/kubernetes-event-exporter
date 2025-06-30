@@ -2,19 +2,20 @@ package sinks
 
 import (
 	"bufio"
-	"cloud.google.com/go/bigquery"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/resmoio/kubernetes-event-exporter/pkg/batch"
-	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
-	"github.com/rs/zerolog/log"
-	"google.golang.org/api/option"
 	"math/rand"
 	"os"
 	"time"
 	"unicode"
+
+	"cloud.google.com/go/bigquery"
+	"github.com/resmoio/kubernetes-event-exporter/pkg/batch"
+	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+	"github.com/rs/zerolog/log"
+	"google.golang.org/api/option"
 )
 
 // Returns a map filtering out keys that have nil value assigned.
@@ -206,12 +207,12 @@ func NewBigQuerySink(cfg *BigQueryConfig) (*BigQuerySink, error) {
 		log.Error().Msgf("BigQuerySink create dataset failed: %v", err)
 	}
 
-	batchWriter := batch.NewWriter(
-		batch.WriterConfig{
-			BatchSize:  cfg.BatchSize,
-			MaxRetries: cfg.MaxRetries,
-			Interval:   time.Duration(cfg.IntervalSeconds) * time.Second,
-			Timeout:    time.Duration(cfg.TimeoutSeconds) * time.Second,
+	batchWriter := batch.NewBufferWriter(
+		batch.BufferWriterConfig{
+			BatchSizeEvents:      cfg.BatchSize,
+			MaxRetriesPerEvent:   cfg.MaxRetries,
+			BatchIntervalSeconds: cfg.IntervalSeconds,
+			BatchTimeoutSeconds:  cfg.TimeoutSeconds,
 		},
 		handleBatch,
 	)
@@ -221,7 +222,7 @@ func NewBigQuerySink(cfg *BigQueryConfig) (*BigQuerySink, error) {
 }
 
 type BigQuerySink struct {
-	batchWriter *batch.Writer
+	batchWriter *batch.BufferWriter
 }
 
 func (e *BigQuerySink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {

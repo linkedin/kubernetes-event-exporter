@@ -2,20 +2,21 @@ package batch
 
 import (
 	"context"
-	"github.com/stretchr/testify/assert"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestSimpleWriter(t *testing.T) {
-	cfg := WriterConfig{
-		BatchSize:  10,
-		MaxRetries: 3,
-		Interval:   time.Second * 2,
+	cfg := BufferWriterConfig{
+		BatchSizeEvents:      10,
+		MaxRetriesPerEvent:   3,
+		BatchIntervalSeconds: 2,
 	}
 
 	var allItems []interface{}
-	w := NewWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
+	w := NewBufferWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
 		resp := make([]bool, len(items))
 		for idx := range resp {
 			resp[idx] = true
@@ -44,14 +45,14 @@ func TestCorrectnessManyTimes(t *testing.T) {
 }
 
 func TestLargerThanBatchSize(t *testing.T) {
-	cfg := WriterConfig{
-		BatchSize:  3,
-		MaxRetries: 3,
-		Interval:   time.Second * 2,
+	cfg := BufferWriterConfig{
+		BatchSizeEvents:      3,
+		MaxRetriesPerEvent:   3,
+		BatchIntervalSeconds: 2,
 	}
 
 	allItems := make([][]interface{}, 0)
-	w := NewWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
+	w := NewBufferWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
 		resp := make([]bool, len(items))
 		for idx := range resp {
 			resp[idx] = true
@@ -72,14 +73,14 @@ func TestLargerThanBatchSize(t *testing.T) {
 }
 
 func TestSimpleInterval(t *testing.T) {
-	cfg := WriterConfig{
-		BatchSize:  5,
-		MaxRetries: 3,
-		Interval:   time.Millisecond * 20,
+	cfg := BufferWriterConfig{
+		BatchSizeEvents:      5,
+		MaxRetriesPerEvent:   3,
+		BatchIntervalSeconds: 1,
 	}
 
 	allItems := make([][]interface{}, 0)
-	w := NewWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
+	w := NewBufferWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
 		resp := make([]bool, len(items))
 		for idx := range resp {
 			resp[idx] = true
@@ -94,7 +95,7 @@ func TestSimpleInterval(t *testing.T) {
 	time.Sleep(time.Millisecond * 5)
 	assert.Len(t, allItems, 0)
 
-	time.Sleep(time.Millisecond * 50)
+	time.Sleep(time.Second * 2)
 	assert.Len(t, allItems, 1)
 	assert.Equal(t, allItems[0], []interface{}{1, 2})
 
@@ -103,14 +104,14 @@ func TestSimpleInterval(t *testing.T) {
 }
 
 func TestIntervalComplex(t *testing.T) {
-	cfg := WriterConfig{
-		BatchSize:  5,
-		MaxRetries: 3,
-		Interval:   time.Millisecond * 20,
+	cfg := BufferWriterConfig{
+		BatchSizeEvents:      5,
+		MaxRetriesPerEvent:   3,
+		BatchIntervalSeconds: 1,
 	}
 
 	allItems := make([][]interface{}, 0)
-	w := NewWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
+	w := NewBufferWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
 		resp := make([]bool, len(items))
 		for idx := range resp {
 			resp[idx] = true
@@ -126,7 +127,7 @@ func TestIntervalComplex(t *testing.T) {
 	w.Submit(3, 4)
 	assert.Len(t, allItems, 0)
 
-	time.Sleep(time.Millisecond * 50)
+	time.Sleep(time.Second * 2)
 	assert.Len(t, allItems, 1)
 	assert.Equal(t, allItems[0], []interface{}{1, 2, 3, 4})
 
@@ -135,14 +136,14 @@ func TestIntervalComplex(t *testing.T) {
 }
 
 func TestIntervalComplexAfterFlush(t *testing.T) {
-	cfg := WriterConfig{
-		BatchSize:  5,
-		MaxRetries: 3,
-		Interval:   time.Millisecond * 20,
+	cfg := BufferWriterConfig{
+		BatchSizeEvents:      5,
+		MaxRetriesPerEvent:   3,
+		BatchIntervalSeconds: 1,
 	}
 
 	allItems := make([][]interface{}, 0)
-	w := NewWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
+	w := NewBufferWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
 		resp := make([]bool, len(items))
 		for idx := range resp {
 			resp[idx] = true
@@ -158,7 +159,7 @@ func TestIntervalComplexAfterFlush(t *testing.T) {
 	w.Submit(3, 4)
 	assert.Len(t, allItems, 0)
 
-	time.Sleep(time.Millisecond * 50)
+	time.Sleep(time.Second * 2)
 	assert.Len(t, allItems, 1)
 	assert.Equal(t, allItems[0], []interface{}{1, 2, 3, 4})
 
@@ -170,14 +171,14 @@ func TestIntervalComplexAfterFlush(t *testing.T) {
 }
 
 func TestRetry(t *testing.T) {
-	cfg := WriterConfig{
-		BatchSize:  5,
-		MaxRetries: 3,
-		Interval:   time.Millisecond * 10,
+	cfg := BufferWriterConfig{
+		BatchSizeEvents:      5,
+		MaxRetriesPerEvent:   3,
+		BatchIntervalSeconds: 1,
 	}
 
 	allItems := make([][]interface{}, 0)
-	w := NewWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
+	w := NewBufferWriter(cfg, func(ctx context.Context, items []interface{}) []bool {
 		resp := make([]bool, len(items))
 		for idx := range resp {
 			resp[idx] = items[idx] != 2
@@ -191,7 +192,7 @@ func TestRetry(t *testing.T) {
 	w.Submit(1, 2, 3)
 	assert.Len(t, allItems, 0)
 
-	time.Sleep(time.Millisecond * 200)
+	time.Sleep(time.Second * 5)
 	assert.Len(t, allItems, 4)
 
 	assert.Equal(t, allItems[0], []interface{}{1, 2, 3})

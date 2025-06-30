@@ -3,8 +3,15 @@ FROM golang:1.20 AS builder
 ARG VERSION
 ENV PKG github.com/resmoio/kubernetes-event-exporter/pkg
 
-ADD . /app
 WORKDIR /app
+
+# Build deps first to improve local build times when iterating.
+ADD go.mod go.sum ./
+
+RUN go mod download
+
+# Then add the rest of the code.
+ADD . ./
 RUN CGO_ENABLED=0 GOOS=linux GO11MODULE=on go build -ldflags="-s -w -X ${PKG}/version.Version=${VERSION}" -a -o /main .
 
 FROM gcr.io/distroless/static:nonroot
