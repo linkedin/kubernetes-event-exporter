@@ -36,7 +36,12 @@ func NewEngine(config *Config, registry ReceiverRegistry) *Engine {
 
 // OnEvent does not care whether event is add or update. Prior filtering should be done in the controller/watcher
 func (e *Engine) OnEvent(event *kube.EnhancedEvent) {
-	e.Route.ProcessEvent(event, e.Registry)
+	e.Route.Process(event, e.Registry)
+}
+
+// OnObject does not care whether object is add, update or delete. Prior filtering should be done in the controller/watcher
+func (e *Engine) OnObject(object *kube.Object) {
+	e.Route.Process(object, e.Registry)
 }
 
 // Stop stops all registered sinks

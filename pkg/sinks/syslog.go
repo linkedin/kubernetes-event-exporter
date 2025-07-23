@@ -3,8 +3,9 @@ package sinks
 import (
 	"context"
 	"encoding/json"
-	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
 	"log/syslog"
+
+	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
 )
 
 type SyslogConfig struct {
@@ -29,7 +30,11 @@ func (w *SyslogSink) Close() {
 	w.sw.Close()
 }
 
-func (w *SyslogSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (w *SyslogSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 
 	if b, err := json.Marshal(ev); err == nil {
 		_, writeErr := w.sw.Write(b)

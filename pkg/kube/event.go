@@ -2,7 +2,6 @@ package kube
 
 import (
 	"encoding/json"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,18 +25,6 @@ func (e EnhancedEvent) DeDot() EnhancedEvent {
 	c.InvolvedObject.Labels = dedotMap(e.InvolvedObject.Labels)
 	c.InvolvedObject.Annotations = dedotMap(e.InvolvedObject.Annotations)
 	return c
-}
-
-func dedotMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return in
-	}
-	ret := make(map[string]string, len(in))
-	for key, value := range in {
-		nKey := strings.ReplaceAll(key, ".", "_")
-		ret[nKey] = value
-	}
-	return ret
 }
 
 type EnhancedObjectReference struct {

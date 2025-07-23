@@ -30,7 +30,11 @@ func (w *Teams) Close() {
 	// No-op
 }
 
-func (w *Teams) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (w *Teams) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	event, err := serializeEventWithLayout(w.cfg.Layout, ev)
 	if err != nil {
 		return err

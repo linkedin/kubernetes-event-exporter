@@ -1,15 +1,18 @@
 package exporter
 
 import (
+	"testing"
+
 	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
 	"github.com/resmoio/kubernetes-event-exporter/pkg/sinks"
 	"github.com/stretchr/testify/assert"
-	"testing"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // testReceiverRegistry just records the events to the registry so that tests can validate routing behavior
 type testReceiverRegistry struct {
-	rcvd map[string][]*kube.EnhancedEvent
+	ercvd map[string][]*kube.EnhancedEvent
+	orcvd map[string][]*kube.Object
 }
 
 func (t *testReceiverRegistry) Register(string, sinks.Sink) {
@@ -17,15 +20,27 @@ func (t *testReceiverRegistry) Register(string, sinks.Sink) {
 }
 
 func (t *testReceiverRegistry) SendEvent(name string, event *kube.EnhancedEvent) {
-	if t.rcvd == nil {
-		t.rcvd = make(map[string][]*kube.EnhancedEvent)
+	if t.ercvd == nil {
+		t.ercvd = make(map[string][]*kube.EnhancedEvent)
 	}
 
-	if _, ok := t.rcvd[name]; !ok {
-		t.rcvd[name] = make([]*kube.EnhancedEvent, 0)
+	if _, ok := t.ercvd[name]; !ok {
+		t.ercvd[name] = make([]*kube.EnhancedEvent, 0)
 	}
 
-	t.rcvd[name] = append(t.rcvd[name], event)
+	t.ercvd[name] = append(t.ercvd[name], event)
+}
+
+func (t *testReceiverRegistry) SendObject(name string, object *kube.Object) {
+	if t.orcvd == nil {
+		t.orcvd = make(map[string][]*kube.Object)
+	}
+
+	if _, ok := t.orcvd[name]; !ok {
+		t.orcvd[name] = make([]*kube.Object, 0)
+	}
+
+	t.orcvd[name] = append(t.orcvd[name], object)
 }
 
 func (t *testReceiverRegistry) Close() {
@@ -33,7 +48,7 @@ func (t *testReceiverRegistry) Close() {
 }
 
 func (t *testReceiverRegistry) isEventRcvd(name string, event *kube.EnhancedEvent) bool {
-	if val, ok := t.rcvd[name]; !ok {
+	if val, ok := t.ercvd[name]; !ok {
 		return false
 	} else {
 		for _, v := range val {
@@ -45,8 +60,21 @@ func (t *testReceiverRegistry) isEventRcvd(name string, event *kube.EnhancedEven
 	}
 }
 
+func (t *testReceiverRegistry) isObjectRcvd(name string, object *kube.Object) bool {
+	if val, ok := t.orcvd[name]; !ok {
+		return false
+	} else {
+		for _, v := range val {
+			if v == object {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 func (t *testReceiverRegistry) count(name string) int {
-	if val, ok := t.rcvd[name]; ok {
+	if val, ok := t.ercvd[name]; ok {
 		return len(val)
 	} else {
 		return 0
@@ -59,8 +87,8 @@ func TestEmptyRoute(t *testing.T) {
 
 	r := Route{}
 
-	r.ProcessEvent(&ev, &reg)
-	assert.Empty(t, reg.rcvd)
+	r.Process(&ev, &reg)
+	assert.Empty(t, reg.ercvd)
 }
 
 func TestBasicRoute(t *testing.T) {
@@ -75,7 +103,7 @@ func TestBasicRoute(t *testing.T) {
 		}},
 	}
 
-	r.ProcessEvent(&ev, &reg)
+	r.Process(&ev, &reg)
 	assert.True(t, reg.isEventRcvd("osman", &ev))
 }
 
@@ -93,7 +121,7 @@ func TestDropRule(t *testing.T) {
 		}},
 	}
 
-	r.ProcessEvent(&ev, &reg)
+	r.Process(&ev, &reg)
 	assert.False(t, reg.isEventRcvd("osman", &ev))
 	assert.Zero(t, reg.count("osman"))
 }
@@ -112,7 +140,7 @@ func TestSingleLevelMultipleMatchRoute(t *testing.T) {
 		}},
 	}
 
-	r.ProcessEvent(&ev, &reg)
+	r.Process(&ev, &reg)
 	assert.True(t, reg.isEventRcvd("osman", &ev))
 	assert.True(t, reg.isEventRcvd("any", &ev))
 }
@@ -125,6 +153,7 @@ func TestSubRoute(t *testing.T) {
 	r := Route{
 		Match: []Rule{{
 			Namespace: "kube-system",
+			Receiver:  "osman",
 		}},
 		Routes: []Route{{
 			Match: []Rule{{
@@ -133,7 +162,7 @@ func TestSubRoute(t *testing.T) {
 		}},
 	}
 
-	r.ProcessEvent(&ev, &reg)
+	r.Process(&ev, &reg)
 
 	assert.True(t, reg.isEventRcvd("osman", &ev))
 }
@@ -159,7 +188,7 @@ func TestSubSubRoute(t *testing.T) {
 		}},
 	}
 
-	r.ProcessEvent(&ev, &reg)
+	r.Process(&ev, &reg)
 
 	assert.True(t, reg.isEventRcvd("osman", &ev))
 	assert.True(t, reg.isEventRcvd("any", &ev))
@@ -189,7 +218,7 @@ func TestSubSubRouteWithDrop(t *testing.T) {
 		}},
 	}
 
-	r.ProcessEvent(&ev, &reg)
+	r.Process(&ev, &reg)
 
 	assert.True(t, reg.isEventRcvd("osman", &ev))
 	assert.False(t, reg.isEventRcvd("any", &ev))
@@ -217,9 +246,28 @@ func Test_GHIssue51(t *testing.T) {
 		}},
 	}
 
-	r.ProcessEvent(&ev1, &reg)
-	r.ProcessEvent(&ev2, &reg)
+	r.Process(&ev1, &reg)
+	r.Process(&ev2, &reg)
 
 	assert.True(t, reg.isEventRcvd("elastic", &ev1))
 	assert.False(t, reg.isEventRcvd("elastic", &ev2))
+}
+
+func TestBasicObjectRoute(t *testing.T) {
+	obj := &kube.Object{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "kube-system",
+		},
+	}
+	reg := testReceiverRegistry{}
+
+	r := Route{
+		Match: []Rule{{
+			Namespace: "kube-system",
+			Receiver:  "osman",
+		}},
+	}
+
+	r.Process(obj, &reg)
+	assert.True(t, reg.isObjectRcvd("osman", obj))
 }

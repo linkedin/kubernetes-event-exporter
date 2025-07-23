@@ -15,7 +15,7 @@ import (
 // transform it depending on its configuration and submit it. Error handling for retries etc. should be handled inside
 // for now.
 type Sink interface {
-	Send(ctx context.Context, ev *kube.EnhancedEvent) error
+	Send(ctx context.Context, payload kube.Payload) error
 	Close()
 }
 

@@ -5,6 +5,7 @@ import "errors"
 // Receiver allows receiving
 type ReceiverConfig struct {
 	Name          string               `yaml:"name"`
+	Mode          string               `yaml:"mode,omitempty"`
 	InMemory      *InMemoryConfig      `yaml:"inMemory"`
 	Webhook       *WebhookConfig       `yaml:"webhook"`
 	File          *FileConfig          `yaml:"file"`

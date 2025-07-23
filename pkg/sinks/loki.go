@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
 	"io/ioutil"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
 	"github.com/rs/zerolog/log"
 )
 
@@ -51,7 +52,11 @@ func generateTimestamp() string {
 	return strconv.FormatInt(time.Now().Unix(), 10) + "000000000"
 }
 
-func (l *Loki) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (l *Loki) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	eventBody, err := serializeEventWithLayout(l.cfg.Layout, ev)
 	if err != nil {
 		return err

@@ -40,7 +40,11 @@ func NewStdoutSink(config *StdoutConfig) (*Stdout, error) {
 func (f *Stdout) Close() {
 }
 
-func (f *Stdout) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (f *Stdout) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	if f.cfg.DeDot {
 		de := ev.DeDot()
 		ev = &de

@@ -82,6 +82,7 @@ func main() {
 
 	engine := exporter.NewEngine(&cfg, &exporter.ChannelBasedReceiverRegistry{MetricsStore: metricsStore})
 	onEvent := engine.OnEvent
+	onObject := engine.OnObject
 	if cfg.ClusterEnvironment != "" || cfg.ClusterName != "" {
 		log.Info().Msgf("ClusterName: %s, ClusterEnvironment: %s", cfg.ClusterName, cfg.ClusterEnvironment)
 
@@ -94,9 +95,24 @@ func main() {
 			}
 			engine.OnEvent(event)
 		}
+
+		onObject = func(object *kube.Object) {
+			if cfg.ClusterEnvironment != "" {
+				object.ClusterEnvironment = cfg.ClusterEnvironment
+			}
+			if cfg.ClusterName != "" {
+				object.ClusterName = cfg.ClusterName
+			}
+			engine.OnObject(object)
+		}
 	}
 
 	w := kube.NewEventWatcher(kubecfg, cfg.Namespace, cfg.MaxEventAgeSeconds, metricsStore, onEvent, cfg.OmitLookup, cfg.CacheSize)
+
+	var objWatcher *kube.ObjectWatcher
+	if cfg.ObjectWatcherEnabled {
+		objWatcher = kube.NewObjectWatcher(kubecfg, cfg.Namespace, onObject)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -120,6 +136,9 @@ func main() {
 				wasLeader = true
 				log.Info().Msg("leader election won")
 				w.Start()
+				if objWatcher != nil {
+					objWatcher.Start()
+				}
 			},
 			// this method gets called when the leader election loop is closed
 			// either due to context cancellation or due to losing the leader lease
@@ -149,10 +168,16 @@ func main() {
 	} else {
 		log.Info().Msg("leader election disabled")
 		w.Start()
+		if objWatcher != nil {
+			objWatcher.Start()
+		}
 		<-ctx.Done()
 	}
 
 	log.Info().Msg("Received signal to exit. Stopping.")
 	w.Stop()
+	if objWatcher != nil {
+		objWatcher.Stop()
+	}
 	engine.Stop()
 }

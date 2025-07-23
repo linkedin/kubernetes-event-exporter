@@ -20,6 +20,7 @@ type KafkaConfig struct {
 	ClientId         string                 `yaml:"clientId"`
 	CompressionCodec string                 `yaml:"compressionCodec" default:"none"`
 	Version          string                 `yaml:"version"`
+	Type             string                 `yaml:"type" default:"event"`
 	TLS              struct {
 		Enable             bool   `yaml:"enable"`
 		CaFile             string `yaml:"caFile"`
@@ -80,37 +81,69 @@ func NewKafkaSink(cfg *KafkaConfig) (Sink, error) {
 	}, nil
 }
 
-// Send an event to Kafka synchronously
-func (k *KafkaSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+// Send a payload to Kafka synchronously
+func (k *KafkaSink) Send(ctx context.Context, payload kube.Payload) error {
 	var toSend []byte
+	var err error
 
-	if k.cfg.Layout != nil {
-		res, err := convertLayoutTemplate(k.cfg.Layout, ev)
-		if err != nil {
-			return err
+	switch k.cfg.Type {
+	case "event", "":
+		ev, ok := payload.(*kube.EnhancedEvent)
+		if !ok {
+			log.Debug().Msg("Received non-event payload, ignoring because sink is configured for events")
+			return nil
 		}
 
-		toSend, err = json.Marshal(res)
+		if k.cfg.Layout != nil {
+			res, err := convertLayoutTemplate(k.cfg.Layout, ev)
+			if err != nil {
+				return err
+			}
+
+			toSend, err = json.Marshal(res)
+			if err != nil {
+				return err
+			}
+		} else if len(k.cfg.KafkaEncode.SchemaID) > 0 {
+			var err error
+			toSend, err = k.encoder.encode(ev.ToJSON())
+			if err != nil {
+				return err
+			}
+		} else {
+			toSend = ev.ToJSON()
+		}
+
+		_, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
+			Topic: k.cfg.Topic,
+			Key:   sarama.StringEncoder(string(ev.UID)),
+			Value: sarama.ByteEncoder(toSend),
+		})
+		return err
+	case "object":
+		o, ok := payload.(*kube.Object)
+		if !ok {
+			log.Debug().Msg("Received non-object payload, ignoring because sink is configured for objects")
+			return nil
+		}
+
+		toSend = o.ToJSON()
+
+		_, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
+			Topic: k.cfg.Topic,
+			Key:   sarama.StringEncoder(string(o.UID)),
+			Value: sarama.ByteEncoder(toSend),
+		})
+		return err
+	default:
+		log.Warn().Str("type", k.cfg.Type).Msg("Unknown kafka payload type, defaulting to object")
+		toSend, err = json.Marshal(payload)
 		if err != nil {
 			return err
 		}
-	} else if len(k.cfg.KafkaEncode.SchemaID) > 0 {
-		var err error
-		toSend, err = k.encoder.encode(ev.ToJSON())
-		if err != nil {
-			return err
-		}
-	} else {
-		toSend = ev.ToJSON()
 	}
 
-	_, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
-		Topic: k.cfg.Topic,
-		Key:   sarama.StringEncoder(string(ev.UID)),
-		Value: sarama.ByteEncoder(toSend),
-	})
-
-	return err
+	return nil
 }
 
 // Close the Kafka producer

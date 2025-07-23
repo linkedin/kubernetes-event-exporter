@@ -49,7 +49,11 @@ func (f *File) Close() {
 	_ = f.writer.Close()
 }
 
-func (f *File) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (f *File) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	if f.DeDot {
 		de := ev.DeDot()
 		ev = &de

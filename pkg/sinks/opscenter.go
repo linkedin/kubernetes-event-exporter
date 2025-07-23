@@ -50,7 +50,11 @@ func NewOpsCenterSink(cfg *OpsCenterConfig) (Sink, error) {
 }
 
 // Send ...
-func (s *OpsCenterSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (s *OpsCenterSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	oi := ssm.CreateOpsItemInput{}
 	t, err := GetString(ev, s.cfg.Title)
 	if err != nil {

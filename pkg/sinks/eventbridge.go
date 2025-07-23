@@ -48,7 +48,11 @@ func NewEventBridgeSink(cfg *EventBridgeConfig) (Sink, error) {
 	}, nil
 }
 
-func (s *EventBridgeSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (s *EventBridgeSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	log.Info().Msg("Sending event to EventBridge ")
 	var toSend string
 	if s.cfg.Details != nil {

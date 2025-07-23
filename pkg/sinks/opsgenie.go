@@ -47,7 +47,11 @@ func NewOpsgenieSink(config *OpsgenieConfig) (Sink, error) {
 	}, nil
 }
 
-func (o *OpsgenieSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (o *OpsgenieSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	request := alert.CreateAlertRequest{
 		Priority: alert.Priority(o.cfg.Priority),
 	}

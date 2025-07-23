@@ -34,7 +34,11 @@ func NewKinesisSink(cfg *KinesisConfig) (Sink, error) {
 	}, nil
 }
 
-func (k *KinesisSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (k *KinesisSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	var toSend []byte
 
 	if k.cfg.Layout != nil {

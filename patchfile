@@ -1,0 +1,1299 @@
+diff --git a/main.go b/main.go
+index e8f9330..50b6772 100644
+--- a/main.go
++++ b/main.go
+@@ -82,6 +82,7 @@ func main() {
+ 
+ 	engine := exporter.NewEngine(&cfg, &exporter.ChannelBasedReceiverRegistry{MetricsStore: metricsStore})
+ 	onEvent := engine.OnEvent
++	onObject := engine.OnObject
+ 	if cfg.ClusterEnvironment != "" || cfg.ClusterName != "" {
+ 		log.Info().Msgf("ClusterName: %s, ClusterEnvironment: %s", cfg.ClusterName, cfg.ClusterEnvironment)
+ 
+@@ -94,10 +95,25 @@ func main() {
+ 			}
+ 			engine.OnEvent(event)
+ 		}
++
++		onObject = func(object *kube.Object) {
++			if cfg.ClusterEnvironment != "" {
++				object.ClusterEnvironment = cfg.ClusterEnvironment
++			}
++			if cfg.ClusterName != "" {
++				object.ClusterName = cfg.ClusterName
++			}
++			engine.OnObject(object)
++		}
+ 	}
+ 
+ 	w := kube.NewEventWatcher(kubecfg, cfg.Namespace, cfg.MaxEventAgeSeconds, metricsStore, onEvent, cfg.OmitLookup, cfg.CacheSize)
+ 
++	var objWatcher *kube.ObjectWatcher
++	if cfg.ObjectWatcherEnabled {
++		objWatcher = kube.NewObjectWatcher(kubecfg, cfg.Namespace, onObject)
++	}
++
+ 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+ 	defer cancel()
+ 
+@@ -120,6 +136,9 @@ func main() {
+ 				wasLeader = true
+ 				log.Info().Msg("leader election won")
+ 				w.Start()
++				if objWatcher != nil {
++					objWatcher.Start()
++				}
+ 			},
+ 			// this method gets called when the leader election loop is closed
+ 			// either due to context cancellation or due to losing the leader lease
+@@ -149,10 +168,16 @@ func main() {
+ 	} else {
+ 		log.Info().Msg("leader election disabled")
+ 		w.Start()
++		if objWatcher != nil {
++			objWatcher.Start()
++		}
+ 		<-ctx.Done()
+ 	}
+ 
+ 	log.Info().Msg("Received signal to exit. Stopping.")
+ 	w.Stop()
++	if objWatcher != nil {
++		objWatcher.Stop()
++	}
+ 	engine.Stop()
+ }
+diff --git a/pkg/exporter/channel_registry.go b/pkg/exporter/channel_registry.go
+index 39db655..8fd40be 100644
+--- a/pkg/exporter/channel_registry.go
++++ b/pkg/exporter/channel_registry.go
+@@ -17,6 +17,7 @@ import (
+ // On closing, the registry sends a signal on all exit channels, and then waits for all to complete.
+ type ChannelBasedReceiverRegistry struct {
+ 	ch     map[string]chan kube.EnhancedEvent
++	objCh  map[string]chan kube.Object
+ 	exitCh map[string]chan interface{}
+ 	wg     *sync.WaitGroup
+ 	MetricsStore *metrics.Store
+@@ -33,16 +34,30 @@ func (r *ChannelBasedReceiverRegistry) SendEvent(name string, event *kube.Enhanc
+ 	}()
+ }
+ 
++func (r *ChannelBasedReceiverRegistry) SendObject(name string, object *kube.Object) {
++	ch := r.objCh[name]
++	if ch == nil {
++		log.Error().Str("name", name).Msg("There is no object channel")
++	}
++
++	go func() {
++		ch <- *object
++	}()
++}
++
+ func (r *ChannelBasedReceiverRegistry) Register(name string, receiver sinks.Sink) {
+ 	if r.ch == nil {
+ 		r.ch = make(map[string]chan kube.EnhancedEvent)
++		r.objCh = make(map[string]chan kube.Object)
+ 		r.exitCh = make(map[string]chan interface{})
+ 	}
+ 
+ 	ch := make(chan kube.EnhancedEvent)
++	objCh := make(chan kube.Object)
+ 	exitCh := make(chan interface{})
+ 
+ 	r.ch[name] = ch
++	r.objCh[name] = objCh
+ 	r.exitCh[name] = exitCh
+ 
+ 	if r.wg == nil {
+diff --git a/pkg/exporter/config.go b/pkg/exporter/config.go
+index 4d15fc1..c92229c 100644
+--- a/pkg/exporter/config.go
++++ b/pkg/exporter/config.go
+@@ -21,21 +21,22 @@ type Config struct {
+ 	// Route is the top route that the events will match
+ 	// TODO: There is currently a tight coupling with route and config, but not with receiver config and sink so
+ 	// TODO: I am not sure what to do here.
+-	LogLevel           string                    `yaml:"logLevel"`
+-	LogFormat          string                    `yaml:"logFormat"`
+-	ThrottlePeriod     int64                     `yaml:"throttlePeriod"`
+-	MaxEventAgeSeconds int64                     `yaml:"maxEventAgeSeconds"`
+-	ClusterName        string                    `yaml:"clusterName,omitempty"`
+-	Namespace          string                    `yaml:"namespace"`
+-	LeaderElection     kube.LeaderElectionConfig `yaml:"leaderElection"`
+-	Route              Route                     `yaml:"route"`
+-	Receivers          []sinks.ReceiverConfig    `yaml:"receivers"`
+-	KubeQPS            float32                   `yaml:"kubeQPS,omitempty"`
+-	KubeBurst          int                       `yaml:"kubeBurst,omitempty"`
+-	MetricsNamePrefix  string                    `yaml:"metricsNamePrefix,omitempty"`
+-	OmitLookup         bool                      `yaml:"omitLookup,omitempty"`
+-	CacheSize          int                       `yaml:"cacheSize,omitempty"`
+-	ClusterEnvironment string                    `yaml:"clusterEnvironment,omitempty"`
++	LogLevel             string                    `yaml:"logLevel"`
++	LogFormat            string                    `yaml:"logFormat"`
++	ThrottlePeriod       int64                     `yaml:"throttlePeriod"`
++	MaxEventAgeSeconds   int64                     `yaml:"maxEventAgeSeconds"`
++	ClusterName          string                    `yaml:"clusterName,omitempty"`
++	Namespace            string                    `yaml:"namespace"`
++	LeaderElection       kube.LeaderElectionConfig `yaml:"leaderElection"`
++	Route                Route                     `yaml:"route"`
++	Receivers            []sinks.ReceiverConfig    `yaml:"receivers"`
++	ObjectWatcherEnabled bool                      `yaml:"objectWatcherEnabled,omitempty"`
++	KubeQPS              float32                   `yaml:"kubeQPS,omitempty"`
++	KubeBurst            int                       `yaml:"kubeBurst,omitempty"`
++	MetricsNamePrefix    string                    `yaml:"metricsNamePrefix,omitempty"`
++	OmitLookup           bool                      `yaml:"omitLookup,omitempty"`
++	CacheSize            int                       `yaml:"cacheSize,omitempty"`
++	ClusterEnvironment   string                    `yaml:"clusterEnvironment,omitempty"`
+ }
+ 
+ func (c *Config) SetDefaults() {
+diff --git a/pkg/exporter/engine.go b/pkg/exporter/engine.go
+index c93b4ff..33c05ef 100644
+--- a/pkg/exporter/engine.go
++++ b/pkg/exporter/engine.go
+@@ -36,7 +36,12 @@ func NewEngine(config *Config, registry ReceiverRegistry) *Engine {
+ 
+ // OnEvent does not care whether event is add or update. Prior filtering should be done in the controller/watcher
+ func (e *Engine) OnEvent(event *kube.EnhancedEvent) {
+-	e.Route.ProcessEvent(event, e.Registry)
++	e.Route.Process(event, e.Registry)
++}
++
++// OnObject does not care whether object is add, update or delete. Prior filtering should be done in the controller/watcher
++func (e *Engine) OnObject(object *kube.Object) {
++	e.Route.Process(object, e.Registry)
+ }
+ 
+ // Stop stops all registered sinks
+diff --git a/pkg/exporter/engine_test.go b/pkg/exporter/engine_test.go
+index 380ece7..f570d62 100644
+--- a/pkg/exporter/engine_test.go
++++ b/pkg/exporter/engine_test.go
+@@ -1,10 +1,11 @@
+ package exporter
+ 
+ import (
++	"testing"
++
+ 	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+ 	"github.com/resmoio/kubernetes-event-exporter/pkg/sinks"
+ 	"github.com/stretchr/testify/assert"
+-	"testing"
+ )
+ 
+ func TestEngineNoRoutes(t *testing.T) {
+diff --git a/pkg/exporter/receivers.go b/pkg/exporter/receivers.go
+index 829e6a7..ef26a93 100644
+--- a/pkg/exporter/receivers.go
++++ b/pkg/exporter/receivers.go
+@@ -8,6 +8,7 @@ import (
+ // ReceiverRegistry registers a receiver with the appropriate sink
+ type ReceiverRegistry interface {
+ 	SendEvent(string, *kube.EnhancedEvent)
++	SendObject(string, *kube.Object)
+ 	Register(string, sinks.Sink)
+ 	Close()
+ }
+diff --git a/pkg/exporter/route.go b/pkg/exporter/route.go
+index d416829..abe7074 100644
+--- a/pkg/exporter/route.go
++++ b/pkg/exporter/route.go
+@@ -11,10 +11,10 @@ type Route struct {
+ 	Routes []Route
+ }
+ 
+-func (r *Route) ProcessEvent(ev *kube.EnhancedEvent, registry ReceiverRegistry) {
++func (r *Route) Process(payload kube.Payload, registry ReceiverRegistry) {
+ 	// First determine whether we will drop the event: If any of the drop is matched, we break the loop
+ 	for _, v := range r.Drop {
+-		if v.MatchesEvent(ev) {
++		if v.Matches(payload) {
+ 			return
+ 		}
+ 	}
+@@ -22,10 +22,13 @@ func (r *Route) ProcessEvent(ev *kube.EnhancedEvent, registry ReceiverRegistry)
+ 	// It has match rules, it should go to the matchers
+ 	matchesAll := true
+ 	for _, rule := range r.Match {
+-		if rule.MatchesEvent(ev) {
++		if rule.Matches(payload) {
+ 			if rule.Receiver != "" {
+-				registry.SendEvent(rule.Receiver, ev)
+-				// Send the event down the hole
++				if event, ok := payload.(*kube.EnhancedEvent); ok {
++					registry.SendEvent(rule.Receiver, event)
++				} else if object, ok := payload.(*kube.Object); ok {
++					registry.SendObject(rule.Receiver, object)
++				}
+ 			}
+ 		} else {
+ 			matchesAll = false
+@@ -35,7 +38,7 @@ func (r *Route) ProcessEvent(ev *kube.EnhancedEvent, registry ReceiverRegistry)
+ 	// If all matches are satisfied, we can send them down to the rabbit hole
+ 	if matchesAll {
+ 		for _, subRoute := range r.Routes {
+-			subRoute.ProcessEvent(ev, registry)
++			subRoute.Process(payload, registry)
+ 		}
+ 	}
+ }
+diff --git a/pkg/exporter/route_test.go b/pkg/exporter/route_test.go
+index a8b514c..4d186f4 100644
+--- a/pkg/exporter/route_test.go
++++ b/pkg/exporter/route_test.go
+@@ -1,15 +1,18 @@
+ package exporter
+ 
+ import (
++	"testing"
++
+ 	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+ 	"github.com/resmoio/kubernetes-event-exporter/pkg/sinks"
+ 	"github.com/stretchr/testify/assert"
+-	"testing"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ )
+ 
+ // testReceiverRegistry just records the events to the registry so that tests can validate routing behavior
+ type testReceiverRegistry struct {
+-	rcvd map[string][]*kube.EnhancedEvent
++	ercvd map[string][]*kube.EnhancedEvent
++	orcvd map[string][]*kube.Object
+ }
+ 
+ func (t *testReceiverRegistry) Register(string, sinks.Sink) {
+@@ -17,15 +20,27 @@ func (t *testReceiverRegistry) Register(string, sinks.Sink) {
+ }
+ 
+ func (t *testReceiverRegistry) SendEvent(name string, event *kube.EnhancedEvent) {
+-	if t.rcvd == nil {
+-		t.rcvd = make(map[string][]*kube.EnhancedEvent)
++	if t.ercvd == nil {
++		t.ercvd = make(map[string][]*kube.EnhancedEvent)
++	}
++
++	if _, ok := t.ercvd[name]; !ok {
++		t.ercvd[name] = make([]*kube.EnhancedEvent, 0)
++	}
++
++	t.ercvd[name] = append(t.ercvd[name], event)
++}
++
++func (t *testReceiverRegistry) SendObject(name string, object *kube.Object) {
++	if t.orcvd == nil {
++		t.orcvd = make(map[string][]*kube.Object)
+ 	}
+ 
+-	if _, ok := t.rcvd[name]; !ok {
+-		t.rcvd[name] = make([]*kube.EnhancedEvent, 0)
++	if _, ok := t.orcvd[name]; !ok {
++		t.orcvd[name] = make([]*kube.Object, 0)
+ 	}
+ 
+-	t.rcvd[name] = append(t.rcvd[name], event)
++	t.orcvd[name] = append(t.orcvd[name], object)
+ }
+ 
+ func (t *testReceiverRegistry) Close() {
+@@ -33,7 +48,7 @@ func (t *testReceiverRegistry) Close() {
+ }
+ 
+ func (t *testReceiverRegistry) isEventRcvd(name string, event *kube.EnhancedEvent) bool {
+-	if val, ok := t.rcvd[name]; !ok {
++	if val, ok := t.ercvd[name]; !ok {
+ 		return false
+ 	} else {
+ 		for _, v := range val {
+@@ -45,8 +60,21 @@ func (t *testReceiverRegistry) isEventRcvd(name string, event *kube.EnhancedEven
+ 	}
+ }
+ 
++func (t *testReceiverRegistry) isObjectRcvd(name string, object *kube.Object) bool {
++	if val, ok := t.orcvd[name]; !ok {
++		return false
++	} else {
++		for _, v := range val {
++			if v == object {
++				return true
++			}
++		}
++		return false
++	}
++}
++
+ func (t *testReceiverRegistry) count(name string) int {
+-	if val, ok := t.rcvd[name]; ok {
++	if val, ok := t.ercvd[name]; ok {
+ 		return len(val)
+ 	} else {
+ 		return 0
+@@ -59,8 +87,8 @@ func TestEmptyRoute(t *testing.T) {
+ 
+ 	r := Route{}
+ 
+-	r.ProcessEvent(&ev, &reg)
+-	assert.Empty(t, reg.rcvd)
++	r.Process(&ev, &reg)
++	assert.Empty(t, reg.ercvd)
+ }
+ 
+ func TestBasicRoute(t *testing.T) {
+@@ -75,7 +103,7 @@ func TestBasicRoute(t *testing.T) {
+ 		}},
+ 	}
+ 
+-	r.ProcessEvent(&ev, &reg)
++	r.Process(&ev, &reg)
+ 	assert.True(t, reg.isEventRcvd("osman", &ev))
+ }
+ 
+@@ -93,7 +121,7 @@ func TestDropRule(t *testing.T) {
+ 		}},
+ 	}
+ 
+-	r.ProcessEvent(&ev, &reg)
++	r.Process(&ev, &reg)
+ 	assert.False(t, reg.isEventRcvd("osman", &ev))
+ 	assert.Zero(t, reg.count("osman"))
+ }
+@@ -112,7 +140,7 @@ func TestSingleLevelMultipleMatchRoute(t *testing.T) {
+ 		}},
+ 	}
+ 
+-	r.ProcessEvent(&ev, &reg)
++	r.Process(&ev, &reg)
+ 	assert.True(t, reg.isEventRcvd("osman", &ev))
+ 	assert.True(t, reg.isEventRcvd("any", &ev))
+ }
+@@ -125,6 +153,7 @@ func TestSubRoute(t *testing.T) {
+ 	r := Route{
+ 		Match: []Rule{{
+ 			Namespace: "kube-system",
++			Receiver:  "osman",
+ 		}},
+ 		Routes: []Route{{
+ 			Match: []Rule{{
+@@ -133,7 +162,7 @@ func TestSubRoute(t *testing.T) {
+ 		}},
+ 	}
+ 
+-	r.ProcessEvent(&ev, &reg)
++	r.Process(&ev, &reg)
+ 
+ 	assert.True(t, reg.isEventRcvd("osman", &ev))
+ }
+@@ -159,7 +188,7 @@ func TestSubSubRoute(t *testing.T) {
+ 		}},
+ 	}
+ 
+-	r.ProcessEvent(&ev, &reg)
++	r.Process(&ev, &reg)
+ 
+ 	assert.True(t, reg.isEventRcvd("osman", &ev))
+ 	assert.True(t, reg.isEventRcvd("any", &ev))
+@@ -189,7 +218,7 @@ func TestSubSubRouteWithDrop(t *testing.T) {
+ 		}},
+ 	}
+ 
+-	r.ProcessEvent(&ev, &reg)
++	r.Process(&ev, &reg)
+ 
+ 	assert.True(t, reg.isEventRcvd("osman", &ev))
+ 	assert.False(t, reg.isEventRcvd("any", &ev))
+@@ -217,9 +246,28 @@ func Test_GHIssue51(t *testing.T) {
+ 		}},
+ 	}
+ 
+-	r.ProcessEvent(&ev1, &reg)
+-	r.ProcessEvent(&ev2, &reg)
++	r.Process(&ev1, &reg)
++	r.Process(&ev2, &reg)
+ 
+ 	assert.True(t, reg.isEventRcvd("elastic", &ev1))
+ 	assert.False(t, reg.isEventRcvd("elastic", &ev2))
+ }
++
++func TestBasicObjectRoute(t *testing.T) {
++	obj := &kube.Object{
++		ObjectMeta: metav1.ObjectMeta{
++			Namespace: "kube-system",
++		},
++	}
++	reg := testReceiverRegistry{}
++
++	r := Route{
++		Match: []Rule{{
++			Namespace: "kube-system",
++			Receiver:  "osman",
++		}},
++	}
++
++	r.Process(obj, &reg)
++	assert.True(t, reg.isObjectRcvd("osman", obj))
++}
+diff --git a/pkg/exporter/router.go b/pkg/exporter/router.go
+index 5b9481f..fba0a3e 100644
+--- a/pkg/exporter/router.go
++++ b/pkg/exporter/router.go
+@@ -8,5 +8,9 @@ type Router struct {
+ }
+ 
+ func (r *Router) ProcessEvent(event *kube.EnhancedEvent) {
+-	r.cfg.Route.ProcessEvent(event, r.rcvr)
++	r.cfg.Route.Process(event, r.rcvr)
++}
++
++func (r *Router) ProcessObject(object *kube.Object) {
++	r.cfg.Route.Process(object, r.rcvr)
+ }
+diff --git a/pkg/exporter/rule.go b/pkg/exporter/rule.go
+index 35bc9e0..0bf1db2 100644
+--- a/pkg/exporter/rule.go
++++ b/pkg/exporter/rule.go
+@@ -28,6 +28,7 @@ type Rule struct {
+ 	Component   string
+ 	Host        string
+ 	Receiver    string
++	ClusterName string `yaml:"clusterName,omitempty"`
+ }
+ 
+ // MatchesEvent compares the rule to an event and returns a boolean value to indicate
+@@ -93,3 +94,43 @@ func (r *Rule) MatchesEvent(ev *kube.EnhancedEvent) bool {
+ 	// If it failed every step, it must match because our matchers are limiting
+ 	return true
+ }
++
++// Matches is a generic method that checks if a payload matches the rule.
++func (r *Rule) Matches(payload kube.Payload) bool {
++	if event, ok := payload.(*kube.EnhancedEvent); ok {
++		return r.MatchesEvent(event)
++	} else if object, ok := payload.(*kube.Object); ok {
++		return r.matchesObject(object)
++	}
++	return false
++}
++
++// matchesObject compares the rule to a generic object and returns a boolean value to indicate
++// whether the object is compatible with the rule.
++func (r *Rule) matchesObject(obj *kube.Object) bool {
++	// Check for matches on Type (EventType), Namespace, and Labels.
++	rules := [][2]string{
++		{r.Type, obj.EventType},
++		{r.Namespace, obj.Namespace},
++		{r.ClusterName, obj.ClusterName},
++	}
++
++	for _, v := range rules {
++		rule := v[0]
++		value := v[1]
++		if rule != "" {
++			if !matchString(rule, value) {
++				return false
++			}
++		}
++	}
++
++	// Check for label matches.
++	for k, v := range r.Labels {
++		if val, ok := obj.Labels[k]; !ok || !matchString(v, val) {
++			return false
++		}
++	}
++
++	return true
++}
+diff --git a/pkg/exporter/sync_registry.go b/pkg/exporter/sync_registry.go
+index 8c6294e..937b7d2 100644
+--- a/pkg/exporter/sync_registry.go
++++ b/pkg/exporter/sync_registry.go
+@@ -2,6 +2,7 @@ package exporter
+ 
+ import (
+ 	"context"
++
+ 	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+ 	"github.com/resmoio/kubernetes-event-exporter/pkg/sinks"
+ 	"github.com/rs/zerolog/log"
+@@ -20,6 +21,13 @@ func (s *SyncRegistry) SendEvent(name string, event *kube.EnhancedEvent) {
+ 	}
+ }
+ 
++func (s *SyncRegistry) SendObject(name string, object *kube.Object) {
++	err := s.reg[name].Send(context.Background(), object)
++	if err != nil {
++		log.Debug().Err(err).Str("sink", name).Str("object", string(object.UID)).Msg("Cannot send object")
++	}
++}
++
+ func (s *SyncRegistry) Register(name string, sink sinks.Sink) {
+ 	if s.reg == nil {
+ 		s.reg = make(map[string]sinks.Sink)
+diff --git a/pkg/kube/event.go b/pkg/kube/event.go
+index eb3035f..b3ebd37 100644
+--- a/pkg/kube/event.go
++++ b/pkg/kube/event.go
+@@ -2,7 +2,6 @@ package kube
+ 
+ import (
+ 	"encoding/json"
+-	"strings"
+ 	"time"
+ 
+ 	corev1 "k8s.io/api/core/v1"
+@@ -28,18 +27,6 @@ func (e EnhancedEvent) DeDot() EnhancedEvent {
+ 	return c
+ }
+ 
+-func dedotMap(in map[string]string) map[string]string {
+-	if len(in) == 0 {
+-		return in
+-	}
+-	ret := make(map[string]string, len(in))
+-	for key, value := range in {
+-		nKey := strings.ReplaceAll(key, ".", "_")
+-		ret[nKey] = value
+-	}
+-	return ret
+-}
+-
+ type EnhancedObjectReference struct {
+ 	corev1.ObjectReference `json:",inline"`
+ 	Labels                 map[string]string       `json:"labels,omitempty"`
+diff --git a/pkg/kube/object.go b/pkg/kube/object.go
+new file mode 100644
+index 0000000..bf57a17
+--- /dev/null
++++ b/pkg/kube/object.go
+@@ -0,0 +1,43 @@
++package kube
++
++import (
++	"encoding/json"
++
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++// Object is a wrapper for a generic Kubernetes object that provides
++// a structured view of common metadata while keeping the rest of the
++// object flexible. This is the payload sent to sinks for non-event resources.
++type Object struct {
++	// Common Kubernetes metadata that all objects share.
++	metav1.ObjectMeta `json:"metadata,omitempty"`
++
++	// TypeMeta contains the API version and kind of the object.
++	metav1.TypeMeta `json:",inline"`
++
++	// Spec contains the resource-specific specification.
++	// It's kept as a raw JSON message to remain generic.
++	Spec json.RawMessage `json:"spec,omitempty"`
++
++	// Status contains the resource-specific status.
++	// It's also kept as a raw JSON message.
++	Status json.RawMessage `json:"status,omitempty"`
++
++	// EventType indicates whether the object was "added", "updated", or "deleted".
++	EventType string `json:"eventType"`
++
++	// ClusterName is the name of the cluster where the object was observed.
++	ClusterName string `json:"clusterName,omitempty"`
++
++	// ClusterEnvironment is the environment of the cluster (e.g., prod, staging).
++	ClusterEnvironment string `json:"clusterEnvironment,omitempty"`
++}
++
++// ToJSON implements the Payload interface.
++func (o *Object) ToJSON() []byte {
++	// We can safely ignore the error here because the struct is designed
++	// to be serializable.
++	b, _ := json.Marshal(o)
++	return b
++}
+diff --git a/pkg/kube/payload.go b/pkg/kube/payload.go
+new file mode 100644
+index 0000000..5a0e1cb
+--- /dev/null
++++ b/pkg/kube/payload.go
+@@ -0,0 +1,7 @@
++package kube
++
++// Payload is the interface for all data that can be sent to a sink.
++type Payload interface {
++	// ToJSON returns a JSON representation of the payload.
++	ToJSON() []byte
++}
+diff --git a/pkg/kube/utils.go b/pkg/kube/utils.go
+new file mode 100644
+index 0000000..38f3649
+--- /dev/null
++++ b/pkg/kube/utils.go
+@@ -0,0 +1,15 @@
++package kube
++
++import "strings"
++
++func dedotMap(in map[string]string) map[string]string {
++	if len(in) == 0 {
++		return in
++	}
++	ret := make(map[string]string, len(in))
++	for key, value := range in {
++		nKey := strings.ReplaceAll(key, ".", "_")
++		ret[nKey] = value
++	}
++	return ret
++}
+diff --git a/pkg/kube/watcher.go b/pkg/kube/watcher.go
+index 9415811..dd58ed7 100644
+--- a/pkg/kube/watcher.go
++++ b/pkg/kube/watcher.go
+@@ -1,6 +1,7 @@
+ package kube
+ 
+ import (
++	"encoding/json"
+ 	"fmt"
+ 	"sync"
+ 	"time"
+@@ -9,6 +10,8 @@ import (
+ 	"github.com/rs/zerolog/log"
+ 	corev1 "k8s.io/api/core/v1"
+ 	"k8s.io/apimachinery/pkg/api/errors"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime"
+ 	"k8s.io/client-go/dynamic"
+ 	"k8s.io/client-go/informers"
+ 	"k8s.io/client-go/kubernetes"
+@@ -183,3 +186,101 @@ func (e *EventWatcher) Stop() {
+ func (e *EventWatcher) setStartUpTime(time time.Time) {
+ 	startUpTime = time
+ }
++
++type ObjectHandler func(object *Object)
++
++// ObjectWatcher watches for Kubernetes objects and sends them to a channel.
++// Currently, it is hardcoded to watch for Pods only.
++type ObjectWatcher struct {
++	wg        sync.WaitGroup
++	informer  cache.SharedInformer
++	stopper   chan struct{}
++	fn        ObjectHandler
++	clientset kubernetes.Interface
++}
++
++// NewObjectWatcher creates a new ObjectWatcher from a Kubernetes config.
++func NewObjectWatcher(config *rest.Config, namespace string, fn ObjectHandler) *ObjectWatcher {
++	clientset := kubernetes.NewForConfigOrDie(config)
++	factory := informers.NewSharedInformerFactoryWithOptions(clientset, 0, informers.WithNamespace(namespace))
++	informer := factory.Core().V1().Pods().Informer()
++
++	watcher := &ObjectWatcher{
++		informer:  informer,
++		stopper:   make(chan struct{}),
++		fn:        fn,
++		clientset: clientset,
++	}
++
++	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
++		AddFunc:    watcher.onAdd,
++		UpdateFunc: watcher.onUpdate,
++		DeleteFunc: watcher.onDelete,
++	})
++
++	return watcher
++}
++
++func (o *ObjectWatcher) Start() {
++	log.Info().Msg("Starting object watcher (for pods)")
++	o.wg.Add(1)
++	go func() {
++		defer o.wg.Done()
++		o.informer.Run(o.stopper)
++	}()
++}
++
++func (o *ObjectWatcher) Stop() {
++	log.Info().Msg("Stopping object watcher")
++	close(o.stopper)
++	o.wg.Wait()
++}
++
++func (o *ObjectWatcher) onAdd(obj interface{}) {
++	o.handleObject(obj, "added")
++}
++
++func (o *ObjectWatcher) onUpdate(oldObj, newObj interface{}) {
++	o.handleObject(newObj, "updated")
++}
++
++func (o *ObjectWatcher) onDelete(obj interface{}) {
++	// Ignore deletes
++}
++
++func (o *ObjectWatcher) handleObject(obj interface{}, eventType string) {
++	pod, ok := obj.(*corev1.Pod)
++	if !ok {
++		log.Error().Interface("object", obj).Msg("Failed to cast object to *corev1.Pod")
++		return
++	}
++
++	// Convert the typed Pod object to our generic kube.Object for processing.
++	unstructuredMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
++	if err != nil {
++		log.Error().Err(err).Msg("Failed to convert pod to unstructured")
++		return
++	}
++
++	kubeObj := &Object{}
++	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredMap, kubeObj); err != nil {
++		log.Error().Err(err).Msg("Failed to convert unstructured object to structured object")
++		return
++	}
++
++	kubeObj.Kind = "Pod"
++	kubeObj.APIVersion = "v1"
++	kubeObj.EventType = eventType
++
++	// The unstructured conversion doesn't preserve all metadata fields, so we copy them manually.
++	kubeObj.ObjectMeta = *pod.ObjectMeta.DeepCopy()
++
++	// Extract spec and status as raw JSON.
++	spec, _, _ := unstructured.NestedFieldCopy(unstructuredMap, "spec")
++	status, _, _ := unstructured.NestedFieldCopy(unstructuredMap, "status")
++
++	kubeObj.Spec, _ = json.Marshal(spec)
++	kubeObj.Status, _ = json.Marshal(status)
++
++	o.fn(kubeObj)
++}
+diff --git a/pkg/sinks/bigquery.go b/pkg/sinks/bigquery.go
+index 7bc09f3..3945309 100644
+--- a/pkg/sinks/bigquery.go
++++ b/pkg/sinks/bigquery.go
+@@ -2,19 +2,20 @@ package sinks
+ 
+ import (
+ 	"bufio"
+-	"cloud.google.com/go/bigquery"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+-	"github.com/resmoio/kubernetes-event-exporter/pkg/batch"
+-	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+-	"github.com/rs/zerolog/log"
+-	"google.golang.org/api/option"
+ 	"math/rand"
+ 	"os"
+ 	"time"
+ 	"unicode"
++
++	"cloud.google.com/go/bigquery"
++	"github.com/resmoio/kubernetes-event-exporter/pkg/batch"
++	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
++	"github.com/rs/zerolog/log"
++	"google.golang.org/api/option"
+ )
+ 
+ // Returns a map filtering out keys that have nil value assigned.
+@@ -224,7 +225,11 @@ type BigQuerySink struct {
+ 	batchWriter *batch.Writer
+ }
+ 
+-func (e *BigQuerySink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (e *BigQuerySink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	e.batchWriter.Submit(ev)
+ 	return nil
+ }
+diff --git a/pkg/sinks/elasticsearch.go b/pkg/sinks/elasticsearch.go
+index 780566f..8c9aa11 100644
+--- a/pkg/sinks/elasticsearch.go
++++ b/pkg/sinks/elasticsearch.go
+@@ -96,7 +96,11 @@ func formatIndexName(pattern string, when time.Time) string {
+ 	return builder.String()
+ }
+ 
+-func (e *Elasticsearch) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (e *Elasticsearch) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	var toSend []byte
+ 
+ 	if e.cfg.DeDot {
+diff --git a/pkg/sinks/eventbridge.go b/pkg/sinks/eventbridge.go
+index 918ee47..398ad7f 100644
+--- a/pkg/sinks/eventbridge.go
++++ b/pkg/sinks/eventbridge.go
+@@ -48,7 +48,11 @@ func NewEventBridgeSink(cfg *EventBridgeConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (s *EventBridgeSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (s *EventBridgeSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	log.Info().Msg("Sending event to EventBridge ")
+ 	var toSend string
+ 	if s.cfg.Details != nil {
+diff --git a/pkg/sinks/file.go b/pkg/sinks/file.go
+index ecd8df7..ab09158 100644
+--- a/pkg/sinks/file.go
++++ b/pkg/sinks/file.go
+@@ -49,7 +49,11 @@ func (f *File) Close() {
+ 	_ = f.writer.Close()
+ }
+ 
+-func (f *File) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (f *File) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	if f.DeDot {
+ 		de := ev.DeDot()
+ 		ev = &de
+diff --git a/pkg/sinks/firehose.go b/pkg/sinks/firehose.go
+index 6b707f5..dcb644e 100644
+--- a/pkg/sinks/firehose.go
++++ b/pkg/sinks/firehose.go
+@@ -37,7 +37,11 @@ func NewFirehoseSink(cfg *FirehoseConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (f *FirehoseSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (f *FirehoseSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	var toSend []byte
+ 
+ 	if f.cfg.DeDot {
+diff --git a/pkg/sinks/inmemory.go b/pkg/sinks/inmemory.go
+index c74a119..6957716 100644
+--- a/pkg/sinks/inmemory.go
++++ b/pkg/sinks/inmemory.go
+@@ -14,8 +14,10 @@ type InMemory struct {
+ 	Config *InMemoryConfig
+ }
+ 
+-func (i *InMemory) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+-	i.Events = append(i.Events, ev)
++func (s *InMemory) Send(ctx context.Context, payload kube.Payload) error {
++	if ev, ok := payload.(*kube.EnhancedEvent); ok {
++		s.Events = append(s.Events, ev)
++	}
+ 	return nil
+ }
+ 
+diff --git a/pkg/sinks/kafka.go b/pkg/sinks/kafka.go
+index cb7907f..37a1723 100644
+--- a/pkg/sinks/kafka.go
++++ b/pkg/sinks/kafka.go
+@@ -20,6 +20,7 @@ type KafkaConfig struct {
+ 	ClientId         string                 `yaml:"clientId"`
+ 	CompressionCodec string                 `yaml:"compressionCodec" default:"none"`
+ 	Version          string                 `yaml:"version"`
++	Type             string                 `yaml:"type" default:"event"`
+ 	TLS              struct {
+ 		Enable             bool   `yaml:"enable"`
+ 		CaFile             string `yaml:"caFile"`
+@@ -80,37 +81,69 @@ func NewKafkaSink(cfg *KafkaConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-// Send an event to Kafka synchronously
+-func (k *KafkaSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++// Send a payload to Kafka synchronously
++func (k *KafkaSink) Send(ctx context.Context, payload kube.Payload) error {
+ 	var toSend []byte
++	var err error
++
++	switch k.cfg.Type {
++	case "event", "":
++		ev, ok := payload.(*kube.EnhancedEvent)
++		if !ok {
++			log.Debug().Msg("Received non-event payload, ignoring because sink is configured for events")
++			return nil
++		}
+ 
+-	if k.cfg.Layout != nil {
+-		res, err := convertLayoutTemplate(k.cfg.Layout, ev)
+-		if err != nil {
+-			return err
++		if k.cfg.Layout != nil {
++			res, err := convertLayoutTemplate(k.cfg.Layout, ev)
++			if err != nil {
++				return err
++			}
++
++			toSend, err = json.Marshal(res)
++			if err != nil {
++				return err
++			}
++		} else if len(k.cfg.KafkaEncode.SchemaID) > 0 {
++			var err error
++			toSend, err = k.encoder.encode(ev.ToJSON())
++			if err != nil {
++				return err
++			}
++		} else {
++			toSend = ev.ToJSON()
+ 		}
+ 
+-		toSend, err = json.Marshal(res)
+-		if err != nil {
+-			return err
++		_, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
++			Topic: k.cfg.Topic,
++			Key:   sarama.StringEncoder(string(ev.UID)),
++			Value: sarama.ByteEncoder(toSend),
++		})
++		return err
++	case "object":
++		o, ok := payload.(*kube.Object)
++		if !ok {
++			log.Debug().Msg("Received non-object payload, ignoring because sink is configured for objects")
++			return nil
+ 		}
+-	} else if len(k.cfg.KafkaEncode.SchemaID) > 0 {
+-		var err error
+-		toSend, err = k.encoder.encode(ev.ToJSON())
++
++		toSend = o.ToJSON()
++
++		_, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
++			Topic: k.cfg.Topic,
++			Key:   sarama.StringEncoder(string(o.UID)),
++			Value: sarama.ByteEncoder(toSend),
++		})
++		return err
++	default:
++		log.Warn().Str("type", k.cfg.Type).Msg("Unknown kafka payload type, defaulting to object")
++		toSend, err = json.Marshal(payload)
+ 		if err != nil {
+ 			return err
+ 		}
+-	} else {
+-		toSend = ev.ToJSON()
+ 	}
+ 
+-	_, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
+-		Topic: k.cfg.Topic,
+-		Key:   sarama.StringEncoder(string(ev.UID)),
+-		Value: sarama.ByteEncoder(toSend),
+-	})
+-
+-	return err
++	return nil
+ }
+ 
+ // Close the Kafka producer
+diff --git a/pkg/sinks/kinesis.go b/pkg/sinks/kinesis.go
+index 9c11067..644a168 100644
+--- a/pkg/sinks/kinesis.go
++++ b/pkg/sinks/kinesis.go
+@@ -34,7 +34,11 @@ func NewKinesisSink(cfg *KinesisConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (k *KinesisSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (k *KinesisSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	var toSend []byte
+ 
+ 	if k.cfg.Layout != nil {
+diff --git a/pkg/sinks/loki.go b/pkg/sinks/loki.go
+index 4d0a0d9..3d86806 100644
+--- a/pkg/sinks/loki.go
++++ b/pkg/sinks/loki.go
+@@ -6,11 +6,12 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+-	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+ 	"io/ioutil"
+ 	"net/http"
+ 	"strconv"
+ 	"time"
++
++	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+ 	"github.com/rs/zerolog/log"
+ )
+ 
+@@ -51,7 +52,11 @@ func generateTimestamp() string {
+ 	return strconv.FormatInt(time.Now().Unix(), 10) + "000000000"
+ }
+ 
+-func (l *Loki) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (l *Loki) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	eventBody, err := serializeEventWithLayout(l.cfg.Layout, ev)
+ 	if err != nil {
+ 		return err
+diff --git a/pkg/sinks/opensearch.go b/pkg/sinks/opensearch.go
+index 6f58507..019f741 100644
+--- a/pkg/sinks/opensearch.go
++++ b/pkg/sinks/opensearch.go
+@@ -83,7 +83,11 @@ func osFormatIndexName(pattern string, when time.Time) string {
+ 	return builder.String()
+ }
+ 
+-func (e *OpenSearch) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (e *OpenSearch) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	var toSend []byte
+ 
+ 	if e.cfg.DeDot {
+diff --git a/pkg/sinks/opscenter.go b/pkg/sinks/opscenter.go
+index 04f7c05..209003c 100644
+--- a/pkg/sinks/opscenter.go
++++ b/pkg/sinks/opscenter.go
+@@ -50,7 +50,11 @@ func NewOpsCenterSink(cfg *OpsCenterConfig) (Sink, error) {
+ }
+ 
+ // Send ...
+-func (s *OpsCenterSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (s *OpsCenterSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	oi := ssm.CreateOpsItemInput{}
+ 	t, err := GetString(ev, s.cfg.Title)
+ 	if err != nil {
+diff --git a/pkg/sinks/opsgenie.go b/pkg/sinks/opsgenie.go
+index 6976c81..6141f7e 100644
+--- a/pkg/sinks/opsgenie.go
++++ b/pkg/sinks/opsgenie.go
+@@ -47,7 +47,11 @@ func NewOpsgenieSink(config *OpsgenieConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (o *OpsgenieSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (o *OpsgenieSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	request := alert.CreateAlertRequest{
+ 		Priority: alert.Priority(o.cfg.Priority),
+ 	}
+diff --git a/pkg/sinks/pipe.go b/pkg/sinks/pipe.go
+index 8fe4abc..2e867ca 100644
+--- a/pkg/sinks/pipe.go
++++ b/pkg/sinks/pipe.go
+@@ -10,9 +10,9 @@ import (
+ )
+ 
+ type PipeConfig struct {
+-	Path   string                 `yaml:"path"`
++	Path string `yaml:"path"`
+ 	// DeDot all labels and annotations in the event. For both the event and the involvedObject
+-	DeDot       bool              `yaml:"deDot"`
++	DeDot  bool                   `yaml:"deDot"`
+ 	Layout map[string]interface{} `yaml:"layout"`
+ }
+ 
+@@ -43,7 +43,11 @@ func (f *Pipe) Close() {
+ 	_ = f.writer.Close()
+ }
+ 
+-func (f *Pipe) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (f *Pipe) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	if f.cfg.DeDot {
+ 		de := ev.DeDot()
+ 		ev = &de
+diff --git a/pkg/sinks/pubsub.go b/pkg/sinks/pubsub.go
+index 444c488..fc7bb93 100644
+--- a/pkg/sinks/pubsub.go
++++ b/pkg/sinks/pubsub.go
+@@ -45,7 +45,11 @@ func NewPubsubSink(cfg *PubsubConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (ps *PubsubSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (ps *PubsubSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	msg := &pubsub.Message{
+ 		Data: ev.ToJSON(),
+ 	}
+diff --git a/pkg/sinks/receiver.go b/pkg/sinks/receiver.go
+index 21fc35a..a7c882e 100644
+--- a/pkg/sinks/receiver.go
++++ b/pkg/sinks/receiver.go
+@@ -5,6 +5,7 @@ import "errors"
+ // Receiver allows receiving
+ type ReceiverConfig struct {
+ 	Name          string               `yaml:"name"`
++	Mode          string               `yaml:"mode,omitempty"`
+ 	InMemory      *InMemoryConfig      `yaml:"inMemory"`
+ 	Webhook       *WebhookConfig       `yaml:"webhook"`
+ 	File          *FileConfig          `yaml:"file"`
+diff --git a/pkg/sinks/sink.go b/pkg/sinks/sink.go
+index f00134e..2ef9812 100644
+--- a/pkg/sinks/sink.go
++++ b/pkg/sinks/sink.go
+@@ -15,7 +15,7 @@ import (
+ // transform it depending on its configuration and submit it. Error handling for retries etc. should be handled inside
+ // for now.
+ type Sink interface {
+-	Send(ctx context.Context, ev *kube.EnhancedEvent) error
++	Send(ctx context.Context, payload kube.Payload) error
+ 	Close()
+ }
+ 
+diff --git a/pkg/sinks/slack.go b/pkg/sinks/slack.go
+index c1c4539..3de7899 100644
+--- a/pkg/sinks/slack.go
++++ b/pkg/sinks/slack.go
+@@ -32,7 +32,11 @@ func NewSlackSink(cfg *SlackConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (s *SlackSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (s *SlackSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	channel, err := GetString(ev, s.cfg.Channel)
+ 	if err != nil {
+ 		return err
+diff --git a/pkg/sinks/sns.go b/pkg/sinks/sns.go
+index 8fc87b3..2661d84 100644
+--- a/pkg/sinks/sns.go
++++ b/pkg/sinks/sns.go
+@@ -34,7 +34,11 @@ func NewSNSSink(cfg *SNSConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (s *SNSSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (s *SNSSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	toSend, e := serializeEventWithLayout(s.cfg.Layout, ev)
+ 	if e != nil {
+ 		return e
+diff --git a/pkg/sinks/sqs.go b/pkg/sinks/sqs.go
+index c5032c9..3cd7e96 100644
+--- a/pkg/sinks/sqs.go
++++ b/pkg/sinks/sqs.go
+@@ -44,7 +44,11 @@ func NewSQSSink(cfg *SQSConfig) (Sink, error) {
+ 	}, nil
+ }
+ 
+-func (s *SQSSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (s *SQSSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	toSend, e := serializeEventWithLayout(s.cfg.Layout, ev)
+ 	if e != nil {
+ 		return e
+diff --git a/pkg/sinks/stdout.go b/pkg/sinks/stdout.go
+index 47d50fa..336d13e 100644
+--- a/pkg/sinks/stdout.go
++++ b/pkg/sinks/stdout.go
+@@ -40,7 +40,11 @@ func NewStdoutSink(config *StdoutConfig) (*Stdout, error) {
+ func (f *Stdout) Close() {
+ }
+ 
+-func (f *Stdout) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (f *Stdout) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	if f.cfg.DeDot {
+ 		de := ev.DeDot()
+ 		ev = &de
+diff --git a/pkg/sinks/syslog.go b/pkg/sinks/syslog.go
+index 57221f8..787f435 100644
+--- a/pkg/sinks/syslog.go
++++ b/pkg/sinks/syslog.go
+@@ -3,8 +3,9 @@ package sinks
+ import (
+ 	"context"
+ 	"encoding/json"
+-	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+ 	"log/syslog"
++
++	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
+ )
+ 
+ type SyslogConfig struct {
+@@ -29,7 +30,11 @@ func (w *SyslogSink) Close() {
+ 	w.sw.Close()
+ }
+ 
+-func (w *SyslogSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (w *SyslogSink) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 
+ 	if b, err := json.Marshal(ev); err == nil {
+ 		_, writeErr := w.sw.Write(b)
+diff --git a/pkg/sinks/teams.go b/pkg/sinks/teams.go
+index 40e6be7..9135b0f 100644
+--- a/pkg/sinks/teams.go
++++ b/pkg/sinks/teams.go
+@@ -30,7 +30,11 @@ func (w *Teams) Close() {
+ 	// No-op
+ }
+ 
+-func (w *Teams) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (w *Teams) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	event, err := serializeEventWithLayout(w.cfg.Layout, ev)
+ 	if err != nil {
+ 		return err
+diff --git a/pkg/sinks/webhook.go b/pkg/sinks/webhook.go
+index c4f40a1..b9609c4 100644
+--- a/pkg/sinks/webhook.go
++++ b/pkg/sinks/webhook.go
+@@ -39,7 +39,11 @@ func (w *Webhook) Close() {
+ 	w.transport.CloseIdleConnections()
+ }
+ 
+-func (w *Webhook) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
++func (w *Webhook) Send(ctx context.Context, payload kube.Payload) error {
++	ev, ok := payload.(*kube.EnhancedEvent)
++	if !ok {
++		return nil
++	}
+ 	reqBody, err := serializeEventWithLayout(w.cfg.Layout, ev)
+ 	if err != nil {
+ 		return err

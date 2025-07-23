@@ -39,7 +39,11 @@ func (w *Webhook) Close() {
 	w.transport.CloseIdleConnections()
 }
 
-func (w *Webhook) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (w *Webhook) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	reqBody, err := serializeEventWithLayout(w.cfg.Layout, ev)
 	if err != nil {
 		return err

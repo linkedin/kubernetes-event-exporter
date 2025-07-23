@@ -96,7 +96,11 @@ func formatIndexName(pattern string, when time.Time) string {
 	return builder.String()
 }
 
-func (e *Elasticsearch) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (e *Elasticsearch) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	var toSend []byte
 
 	if e.cfg.DeDot {

@@ -28,6 +28,7 @@ type Rule struct {
 	Component   string
 	Host        string
 	Receiver    string
+	ClusterName string `yaml:"clusterName,omitempty"`
 }
 
 // MatchesEvent compares the rule to an event and returns a boolean value to indicate
@@ -91,5 +92,45 @@ func (r *Rule) MatchesEvent(ev *kube.EnhancedEvent) bool {
 	}
 
 	// If it failed every step, it must match because our matchers are limiting
+	return true
+}
+
+// Matches is a generic method that checks if a payload matches the rule.
+func (r *Rule) Matches(payload kube.Payload) bool {
+	if event, ok := payload.(*kube.EnhancedEvent); ok {
+		return r.MatchesEvent(event)
+	} else if object, ok := payload.(*kube.Object); ok {
+		return r.matchesObject(object)
+	}
+	return false
+}
+
+// matchesObject compares the rule to a generic object and returns a boolean value to indicate
+// whether the object is compatible with the rule.
+func (r *Rule) matchesObject(obj *kube.Object) bool {
+	// Check for matches on Type (EventType), Namespace, and Labels.
+	rules := [][2]string{
+		{r.Type, obj.EventType},
+		{r.Namespace, obj.Namespace},
+		{r.ClusterName, obj.ClusterName},
+	}
+
+	for _, v := range rules {
+		rule := v[0]
+		value := v[1]
+		if rule != "" {
+			if !matchString(rule, value) {
+				return false
+			}
+		}
+	}
+
+	// Check for label matches.
+	for k, v := range r.Labels {
+		if val, ok := obj.Labels[k]; !ok || !matchString(v, val) {
+			return false
+		}
+	}
+
 	return true
 }

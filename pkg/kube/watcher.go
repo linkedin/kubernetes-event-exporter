@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -182,4 +185,102 @@ func (e *EventWatcher) Stop() {
 
 func (e *EventWatcher) setStartUpTime(time time.Time) {
 	startUpTime = time
+}
+
+type ObjectHandler func(object *Object)
+
+// ObjectWatcher watches for Kubernetes objects and sends them to a channel.
+// Currently, it is hardcoded to watch for Pods only.
+type ObjectWatcher struct {
+	wg        sync.WaitGroup
+	informer  cache.SharedInformer
+	stopper   chan struct{}
+	fn        ObjectHandler
+	clientset kubernetes.Interface
+}
+
+// NewObjectWatcher creates a new ObjectWatcher from a Kubernetes config.
+func NewObjectWatcher(config *rest.Config, namespace string, fn ObjectHandler) *ObjectWatcher {
+	clientset := kubernetes.NewForConfigOrDie(config)
+	factory := informers.NewSharedInformerFactoryWithOptions(clientset, 0, informers.WithNamespace(namespace))
+	informer := factory.Core().V1().Pods().Informer()
+
+	watcher := &ObjectWatcher{
+		informer:  informer,
+		stopper:   make(chan struct{}),
+		fn:        fn,
+		clientset: clientset,
+	}
+
+	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    watcher.onAdd,
+		UpdateFunc: watcher.onUpdate,
+		DeleteFunc: watcher.onDelete,
+	})
+
+	return watcher
+}
+
+func (o *ObjectWatcher) Start() {
+	log.Info().Msg("Starting object watcher (for pods)")
+	o.wg.Add(1)
+	go func() {
+		defer o.wg.Done()
+		o.informer.Run(o.stopper)
+	}()
+}
+
+func (o *ObjectWatcher) Stop() {
+	log.Info().Msg("Stopping object watcher")
+	close(o.stopper)
+	o.wg.Wait()
+}
+
+func (o *ObjectWatcher) onAdd(obj interface{}) {
+	o.handleObject(obj, "added")
+}
+
+func (o *ObjectWatcher) onUpdate(oldObj, newObj interface{}) {
+	o.handleObject(newObj, "updated")
+}
+
+func (o *ObjectWatcher) onDelete(obj interface{}) {
+	// Ignore deletes
+}
+
+func (o *ObjectWatcher) handleObject(obj interface{}, eventType string) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		log.Error().Interface("object", obj).Msg("Failed to cast object to *corev1.Pod")
+		return
+	}
+
+	// Convert the typed Pod object to our generic kube.Object for processing.
+	unstructuredMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pod)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to convert pod to unstructured")
+		return
+	}
+
+	kubeObj := &Object{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredMap, kubeObj); err != nil {
+		log.Error().Err(err).Msg("Failed to convert unstructured object to structured object")
+		return
+	}
+
+	kubeObj.Kind = "Pod"
+	kubeObj.APIVersion = "v1"
+	kubeObj.EventType = eventType
+
+	// The unstructured conversion doesn't preserve all metadata fields, so we copy them manually.
+	kubeObj.ObjectMeta = *pod.ObjectMeta.DeepCopy()
+
+	// Extract spec and status as raw JSON.
+	spec, _, _ := unstructured.NestedFieldCopy(unstructuredMap, "spec")
+	status, _, _ := unstructured.NestedFieldCopy(unstructuredMap, "status")
+
+	kubeObj.Spec, _ = json.Marshal(spec)
+	kubeObj.Status, _ = json.Marshal(status)
+
+	o.fn(kubeObj)
 }

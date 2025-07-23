@@ -8,5 +8,9 @@ type Router struct {
 }
 
 func (r *Router) ProcessEvent(event *kube.EnhancedEvent) {
-	r.cfg.Route.ProcessEvent(event, r.rcvr)
+	r.cfg.Route.Process(event, r.rcvr)
+}
+
+func (r *Router) ProcessObject(object *kube.Object) {
+	r.cfg.Route.Process(object, r.rcvr)
 }

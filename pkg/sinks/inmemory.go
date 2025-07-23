@@ -14,8 +14,10 @@ type InMemory struct {
 	Config *InMemoryConfig
 }
 
-func (i *InMemory) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
-	i.Events = append(i.Events, ev)
+func (s *InMemory) Send(ctx context.Context, payload kube.Payload) error {
+	if ev, ok := payload.(*kube.EnhancedEvent); ok {
+		s.Events = append(s.Events, ev)
+	}
 	return nil
 }
 

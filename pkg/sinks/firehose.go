@@ -37,7 +37,11 @@ func NewFirehoseSink(cfg *FirehoseConfig) (Sink, error) {
 	}, nil
 }
 
-func (f *FirehoseSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (f *FirehoseSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	var toSend []byte
 
 	if f.cfg.DeDot {

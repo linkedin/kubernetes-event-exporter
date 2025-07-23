@@ -10,9 +10,9 @@ import (
 )
 
 type PipeConfig struct {
-	Path   string                 `yaml:"path"`
+	Path string `yaml:"path"`
 	// DeDot all labels and annotations in the event. For both the event and the involvedObject
-	DeDot       bool              `yaml:"deDot"`
+	DeDot  bool                   `yaml:"deDot"`
 	Layout map[string]interface{} `yaml:"layout"`
 }
 
@@ -43,7 +43,11 @@ func (f *Pipe) Close() {
 	_ = f.writer.Close()
 }
 
-func (f *Pipe) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (f *Pipe) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	if f.cfg.DeDot {
 		de := ev.DeDot()
 		ev = &de

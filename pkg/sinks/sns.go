@@ -34,7 +34,11 @@ func NewSNSSink(cfg *SNSConfig) (Sink, error) {
 	}, nil
 }
 
-func (s *SNSSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (s *SNSSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	toSend, e := serializeEventWithLayout(s.cfg.Layout, ev)
 	if e != nil {
 		return e

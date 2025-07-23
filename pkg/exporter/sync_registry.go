@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"context"
+
 	"github.com/resmoio/kubernetes-event-exporter/pkg/kube"
 	"github.com/resmoio/kubernetes-event-exporter/pkg/sinks"
 	"github.com/rs/zerolog/log"
@@ -17,6 +18,13 @@ func (s *SyncRegistry) SendEvent(name string, event *kube.EnhancedEvent) {
 	err := s.reg[name].Send(context.Background(), event)
 	if err != nil {
 		log.Debug().Err(err).Str("sink", name).Str("event", string(event.UID)).Msg("Cannot send event")
+	}
+}
+
+func (s *SyncRegistry) SendObject(name string, object *kube.Object) {
+	err := s.reg[name].Send(context.Background(), object)
+	if err != nil {
+		log.Debug().Err(err).Str("sink", name).Str("object", string(object.UID)).Msg("Cannot send object")
 	}
 }
 

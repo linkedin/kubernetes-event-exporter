@@ -45,7 +45,11 @@ func NewPubsubSink(cfg *PubsubConfig) (Sink, error) {
 	}, nil
 }
 
-func (ps *PubsubSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (ps *PubsubSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	msg := &pubsub.Message{
 		Data: ev.ToJSON(),
 	}

@@ -32,7 +32,11 @@ func NewSlackSink(cfg *SlackConfig) (Sink, error) {
 	}, nil
 }
 
-func (s *SlackSink) Send(ctx context.Context, ev *kube.EnhancedEvent) error {
+func (s *SlackSink) Send(ctx context.Context, payload kube.Payload) error {
+	ev, ok := payload.(*kube.EnhancedEvent)
+	if !ok {
+		return nil
+	}
 	channel, err := GetString(ev, s.cfg.Channel)
 	if err != nil {
 		return err
